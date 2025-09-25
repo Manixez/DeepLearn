@@ -8,7 +8,7 @@ import time
 import os
 
 # Import our custom modules
-from model_lenet import LeNet5
+from model_vit import ViTSmall
 from datareader import MakananIndo
 from utils import check_set_gpu
 
@@ -156,12 +156,13 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     
     # Initialize model
-    model = LeNet5(in_channel=3, num_classes=num_classes)
+    model = ViTSmall(num_classes=num_classes, pretrained=True)
     model = model.to(device)
     
     # Loss function and optimizer
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    # Menggunakan learning rate yang lebih kecil untuk fine-tuning
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate * 0.1)
     
     print(f"\nStarting training with:")
     print(f"- Device: {device}")

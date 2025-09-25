@@ -6,7 +6,13 @@ import random
 import pandas as pd
 import cv2
 import matplotlib.pyplot as plt
-from torchvision.transforms import ToTensor, Normalize, Compose
+from PIL import Image
+from torchvision import transforms
+from torchvision.transforms import (
+    ToTensor, Normalize, Compose, RandomResizedCrop, 
+    RandomHorizontalFlip, ColorJitter, RandomRotation,
+    RandomAffine, Resize, CenterCrop
+)
 
 # Set random seed for reproducibility
 RANDOM_SEED = 2025
@@ -23,15 +29,45 @@ class MakananIndo(Dataset):
     
     def __init__(self,
                  data_dir='train',
-                 img_size=(32, 32),
+                 img_size=(224, 224),  # Update default size for ViT
                  transform=None,
                  split='train'
                  ):
         
         self.data_dir = data_dir
         self.img_size = img_size
-        self.transform = transform
         self.split = split
+        
+        # Default transforms with data augmentation for training
+        if transform is None:
+            if split == 'train':
+                self.transform = Compose([
+                    RandomResizedCrop(img_size, scale=(0.8, 1.0)),  # Crop with zoom
+                    RandomHorizontalFlip(p=0.5),  # Horizontal flip
+                    ColorJitter(
+                        brightness=0.2,  # Brightness variation
+                        contrast=0.2,    # Contrast variation
+                        saturation=0.2,  # Saturation variation
+                        hue=0.1         # Hue variation
+                    ),
+                    RandomRotation(15),  # Rotate ±15 degrees
+                    RandomAffine(
+                        degrees=0,
+                        translate=(0.1, 0.1),  # Translation
+                        scale=(0.9, 1.1),      # Scale variation
+                    ),
+                    ToTensor(),
+                    Normalize(mean=self.IMAGENET_MEAN, std=self.IMAGENET_STD)
+                ])
+            else:  # validation/test transforms
+                self.transform = Compose([
+                    Resize(int(img_size[0] * 1.14)),  # Resize with aspect ratio
+                    CenterCrop(img_size),             # Center crop to target size
+                    ToTensor(),
+                    Normalize(mean=self.IMAGENET_MEAN, std=self.IMAGENET_STD)
+                ])
+        else:
+            self.transform = transform
 
         # List seluruh file gambar dalam direktori data (.jpg atau .png)
         self.image_files = [f for f in os.listdir(data_dir) if f.endswith('.jpg') or f.endswith('.png')]
@@ -82,9 +118,11 @@ class MakananIndo(Dataset):
         # Load image using cv2
         image = cv2.imread(img_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
-        image = cv2.resize(image, self.img_size)  # Resize to specified img_size
         
-        # Apply transforms (ToTensor + Normalization)
+        # Convert numpy array to PIL Image
+        image = Image.fromarray(image)
+        
+        # Apply transforms (including resize and normalization)
         if self.transform:
             image = self.transform(image)
         else:

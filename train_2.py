@@ -6,9 +6,10 @@ import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, classification_report
 import time
 import os
-from torchvision.models import mnasnet0_5, MNASNet0_5_Weights  # Changed to MNASNet
+import math
 
 # Import our custom modules
+from model_vit import ViTSmall
 from datareader import MakananIndo
 from utils import check_set_gpu
 
@@ -27,35 +28,44 @@ def create_label_encoder(dataset):
     return label_to_idx, idx_to_label, unique_labels
 
 
-def create_mnasnet_model(num_classes, freeze_backbone=True):
-    """Create MNASNet0.5 model with transfer learning"""
-    # Load pretrained MNASNet model
-    weights = MNASNet0_5_Weights.IMAGENET1K_V1
-    model = mnasnet0_5(weights=weights)
+def create_vit_model(num_classes, freeze_backbone=True):
+    """Create ViT-Small model with transfer learning"""
+    # Load pretrained ViT model
+    model = ViTSmall(num_classes=num_classes, pretrained=True)
     
     # Print model info
-    print(f"Loaded MNASNet0.5 pretrained model with weights: {weights}")
-    print(f"Original classifier: {model.classifier}")
+    print(f"Loaded ViT-Small pretrained model")
     
-    # Freeze all parameters if requested
     if freeze_backbone:
-        for param in model.parameters():
-            param.requires_grad = False
-        print("Froze all backbone parameters")
-    
-    # Replace the final classification layer
-    in_features = model.classifier[-1].in_features
-    model.classifier = nn.Sequential(
-        nn.Linear(in_features, num_classes),
-        nn.Softmax(dim=1)
-    )
-    
-    print(f"Replaced classifier with new layer: {model.classifier}")
-    print(f"New classifier output features: {num_classes}")
-    
-    # Ensure the new classifier parameters are trainable
-    for param in model.classifier.parameters():
-        param.requires_grad = True
+        # Strategi fine-tuning yang lebih baik untuk ViT:
+        # 1. Bekukan embedding dan sebagian besar transformer blocks
+        # 2. Fine-tune 2 transformer block terakhir dan head
+        for name, param in model.model.named_parameters():
+            # Bekukan embedding dan positional embedding
+            if 'patch_embed' in name or 'pos_embed' in name:
+                param.requires_grad = False
+                continue
+                
+            # Bekukan layer normalization (untuk stabilitas)
+            if 'norm' in name:
+                param.requires_grad = False
+                continue
+            
+            # Bekukan semua block kecuali 2 terakhir
+            if 'blocks' in name:
+                block_num = int(name.split('.')[1])  # Ambil nomor block
+                if block_num < 10:  # ViT Small memiliki 12 block, fine-tune 2 terakhir
+                    param.requires_grad = False
+                    continue
+            
+            # Head dan 2 block terakhir akan tetap trainable
+        
+        print("Fine-tuning strategy:")
+        print("- Frozen: Patch embedding, Position embedding")
+        print("- Frozen: First 10 transformer blocks")
+        print("- Trainable: Last 2 transformer blocks")
+        print("- Trainable: Layer norms in last 2 blocks")
+        print("- Trainable: MLP head")
     
     return model
 
@@ -72,8 +82,8 @@ def calculate_metrics(y_true, y_pred, num_classes):
     return accuracy, f1, precision, recall
 
 
-def train_epoch(model, train_loader, criterion, optimizer, device, label_to_idx):
-    """Train for one epoch"""
+def train_epoch(model, train_loader, criterion, optimizer, scheduler, device, label_to_idx, max_grad_norm=1.0):
+    """Train for one epoch with gradient clipping and learning rate scheduling"""
     model.train()
     running_loss = 0.0
     all_predictions = []
@@ -194,9 +204,9 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=nworkers)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=nworkers)
     
-    # Initialize MNASNet model with transfer learning
-    print("\nInitializing MNASNet0.5 model...")
-    model = create_mnasnet_model(num_classes, freeze_backbone=True)
+    # Initialize ViT model with transfer learning
+    print("\nInitializing ViT-Small model...")
+    model = create_vit_model(num_classes, freeze_backbone=True)
     model = model.to(device)
     
     # Count trainable parameters
@@ -206,23 +216,56 @@ def main():
     print(f"Trainable parameters: {trainable_params:,}")
     print(f"Frozen parameters: {total_params - trainable_params:,}")
     
-    # Loss function and optimizer (only optimize trainable parameters)
+    # Loss function and optimizer setup
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=learning_rate)
+    
+    # Base learning rate untuk ViT fine-tuning
+    base_lr = learning_rate * 0.1
+    
+    # AdamW optimizer dengan weight decay
+    optimizer = optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=base_lr,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=0.01  # L2 regularization
+    )
+    
+    # Learning rate scheduler setup
+    num_training_steps = len(train_loader) * num_epochs
+    num_warmup_steps = len(train_loader) * 2  # 2 epochs of warmup
+    
+    # Cosine schedule with warmup
+    def lr_lambda(current_step):
+        # Warm up phase
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        # Cosine decay
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    
+    # Gradient clipping
+    max_grad_norm = 1.0
     
     print(f"\nStarting training with:")
     print(f"- Device: {device}")
-    print(f"- Model: MNASNet0.5 (pretrained)")
-    print(f"- Image size: {img_size}x{img_size}")
+    print(f"- Model: ViT-Small (pretrained)")
+    print(f"- Image size: 224x224")
     print(f"- Batch size: {batch_size}")
-    print(f"- Learning rate: {learning_rate}")
+    print(f"- Base learning rate: {base_lr}")
+    print(f"- Warmup epochs: 2")
     print(f"- Number of epochs: {num_epochs}")
-    print(f"- Transfer learning: Backbone frozen, classifier trainable")
+    print(f"- Weight decay: 0.01")
+    print(f"- Gradient clipping: {max_grad_norm}")
+    print(f"- Transfer learning: Backbone frozen, head trainable")
+    print(f"- Scheduler: Cosine with warmup")
     print("-" * 80)
     
     # Training loop
     best_val_accuracy = 0.0
-    best_model_path = "best_mnasnet_model.pth"
+    best_model_path = "best_vit_model.pth"
     
     for epoch in range(num_epochs):
         print(f"\nEpoch [{epoch+1}/{num_epochs}]")
@@ -232,7 +275,7 @@ def main():
         
         # Training phase
         train_loss, train_acc, train_f1, train_precision, train_recall = train_epoch(
-            model, train_loader, criterion, optimizer, device, label_to_idx
+            model, train_loader, criterion, optimizer, scheduler, device, label_to_idx, max_grad_norm
         )
         
         # Validation phase

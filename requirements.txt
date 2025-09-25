@@ -1,0 +1,13 @@
+torch>=1.7.0
+torchvision>=0.8.0
+timm>=0.4.12
+numpy
+pillow
+tqdm
+scikit-learn>=1.0.0  # untuk metrics
+pandas  # untuk membaca CSV
+opencv-python  # untuk cv2
+matplotlib  # untuk visualisasi
+tensorboard  # untuk monitoring training
+torchinfo  # untuk model summary
+ipython  # untuk interactive development
